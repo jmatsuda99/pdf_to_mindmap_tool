@@ -26,9 +26,6 @@ except Exception:
 
 DEFAULT_DEPTH = 2
 
-# ------------------------------
-# Data structures
-# ------------------------------
 @dataclass
 class Node:
     title: str
@@ -36,9 +33,6 @@ class Node:
     def to_dict(self):
         return {"title": self.title, "children": [c.to_dict() for c in self.children]}
 
-# ------------------------------
-# PDF text extraction
-# ------------------------------
 def extract_text_from_pdf(file_bytes: bytes) -> str:
     if PyPDF2 is None:
         raise RuntimeError("PyPDF2 not installed. Please `pip install PyPDF2`.")
@@ -51,9 +45,6 @@ def extract_text_from_pdf(file_bytes: bytes) -> str:
             texts.append("")
     return "\n".join(texts)
 
-# ------------------------------
-# Heading detection heuristics
-# ------------------------------
 _heading_patterns = [
     r"^(?:第\s*\d+\s*章)\s*(.+)?$",
     r"^(?:Appendix|付録)\s*[:：]?\s*(.+)?$",
@@ -99,7 +90,6 @@ def build_tree_from_lines(lines):
             stack.append((level,node))
             last_added=node
         else:
-            # treat as bullet under last heading
             parent=last_added if last_added is not None else root
             parent.children.append(Node(line))
     return root
@@ -114,9 +104,6 @@ def trim_depth(node: Node, depth:int, current:int=0)->Optional[Node]:
                 new_node.children.append(trimmed)
     return new_node
 
-# ------------------------------
-# Graphviz rendering (robust)
-# ------------------------------
 def html_escape(s: str) -> str:
     return s.replace("&","&amp;").replace("<","&lt;").replace(">","&gt;")
 
@@ -131,15 +118,12 @@ def to_graphviz(node: Node):
         dot.node(nid, f"<{label}>", shape="box", style="rounded,filled", fillcolor="white")
         if parent_id:
             dot.edge(parent_id, nid)
-        for c in n.children:
+        for c in node.children:
             add(c, nid, idx)
         return nid
     add(node, None)
     return dot
 
-# ------------------------------
-# Sunburst / Treemap via Plotly
-# ------------------------------
 def to_edges(node: Node, parent_title: Optional[str]=None, rows=None):
     if rows is None: rows = []
     rows.append({"id": node.title, "parent": parent_title})
@@ -148,16 +132,16 @@ def to_edges(node: Node, parent_title: Optional[str]=None, rows=None):
     return rows
 
 # ------------------------------
-# Streamlit UI
+# Streamlit UI (with explicit keys)
 # ------------------------------
 st.set_page_config(page_title="PDF→構文木（Graphviz/Sunburst） L=2", layout="wide")
 st.title("構文木解析 → 視覚化（Graphvizツリー / Sunburst）")
-st.caption("Mermaidの代わりに **Graphviz** と **Plotly Sunburst** を使った安定描画に切り替えました。")
 
-uploaded=st.file_uploader("PDFファイルをアップロード", type=["pdf"])
+uploaded=st.file_uploader("PDFファイルをアップロード", type=["pdf"], key="pdf_file")
 col1,col2=st.columns([2,1])
-depth=col2.slider("表示する深さ (L)", min_value=1, max_value=8, value=DEFAULT_DEPTH, step=1)
-view = col2.radio("表示モード", ["Graphvizツリー","Sunburst","Treemap","アウトライン"], index=0)
+depth=col2.slider("表示する深さ (L)", min_value=1, max_value=8, value=DEFAULT_DEPTH, step=1, key="depth_slider")
+options=("Graphvizツリー","Sunburst","Treemap","アウトライン")
+view = col2.radio("表示モード", options=options, index=0, key="view_mode")
 
 if uploaded is not None:
     try:
@@ -199,17 +183,16 @@ if uploaded is not None:
             def to_outline(n:Node, level=0, out=None):
                 if out is None: out=[]
                 out.append("  "*level + "- " + n.title)
-                for c in n.children: to_outline(c, level+1, out)
+                for c in node.children: to_outline(c, level+1, out)
                 return "\n".join(out)
             st.code(to_outline(trimmed), language="text")
 
-        # Export
         with st.expander("エクスポート"):
             colA, colB = st.columns(2)
             json_bytes=json.dumps(trimmed.to_dict(), ensure_ascii=False, indent=2).encode("utf-8")
-            colA.download_button("JSON", data=json_bytes, file_name="tree.json")
+            colA.download_button("JSON", data=json_bytes, file_name="tree.json", key="dl_json")
             if graphviz is not None:
                 dot = to_graphviz(trimmed)
-                colB.download_button("Graphviz DOT", data=dot.source.encode("utf-8"), file_name="tree.dot")
+                colB.download_button("Graphviz DOT", data=dot.source.encode("utf-8"), file_name="tree.dot", key="dl_dot")
 else:
     st.info("右上のファイルピッカーからPDFを選択してください。")
