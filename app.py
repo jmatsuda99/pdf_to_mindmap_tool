@@ -11,17 +11,10 @@ import uuid
 try:
     import PyPDF2
 except Exception as e:
-    PyPDF2 = None
+        PyPDF2 = None
 
-# ------------------------------
-# Config
-# ------------------------------
 DEFAULT_DEPTH = 2
-SANITIZE = True  # turn off if you want raw labels
 
-# ------------------------------
-# Data structures
-# ------------------------------
 @dataclass
 class Node:
     title: str
@@ -29,29 +22,29 @@ class Node:
     def to_dict(self):
         return {"title": self.title, "children": [c.to_dict() for c in self.children]}
 
-# ------------------------------
-# Utils
-# ------------------------------
 BAD_CTRL = re.compile(r"[\x00-\x1F\x7F]")
-def sanitize_title(s: str) -> str:
-    # Remove control chars
+LEADING_NO = re.compile(r"^\s*\d+\s*$")
+LEADING_BULLET = re.compile(r"^\s*[-•・·]\s*")
+
+def clean_label(s: str) -> str:
     s = BAD_CTRL.sub("", s)
-    # Common Mermaid breaking chars → replace with full-width or safe glyphs
-    replacements = {
-        "`": "'",
-        "\\": "⧵",
-        "{": "（",  "}": "）",
-        "[": "［",  "]": "］",
-        "<": "‹",  ">": "›",
-        "#": "＃",
-        "|": "｜",
-        "\"": "”",
-        "~": "～",
+    # Replace characters known to confuse Mermaid parser
+    repl = {
+        "`":"'", "\\":"⧵", "{":"（","}":"）", "[":"［","]":"］",
+        "<":"‹", ">":"›", "#":"＃", "|":"｜", "\"":"”", "~":"～"
     }
-    for a,b in replacements.items():
+    for a,b in repl.items():
         s = s.replace(a,b)
-    # collapse excessive spaces
+    # Normalize bullets / leading hyphens
+    s = LEADING_BULLET.sub("", s)  # remove a single leading bullet/hyphen
+    # If the whole label is just a number, prefix a safe text
+    if LEADING_NO.match(s):
+        s = "No. " + s.strip()
+    # Collapse whitespace
     s = re.sub(r"\s+", " ", s).strip()
+    # Avoid empty labels
+    if not s:
+        s = "…"
     return s
 
 def extract_text_from_pdf(file_bytes: bytes) -> str:
@@ -126,13 +119,11 @@ def trim_depth(node: Node, depth:int, current:int=0)->Optional[Node]:
                 new_node.children.append(trimmed)
     return new_node
 
-def to_mermaid(node: Node, sanitize: bool=True)->str:
-    def clean(t: str)->str:
-        return sanitize_title(t) if sanitize else t.replace("`","'")
+def to_mermaid(node: Node)->str:
     lines=["mindmap"]
     def rec(n:Node, indent:int):
         prefix="  "*indent
-        title=clean(n.title)
+        title=clean_label(n.title)
         if indent==0:
             lines.append(f"{prefix}root(({title}))")
         else:
@@ -159,24 +150,18 @@ def render_mermaid(mermaid_inner:str, height:int=650):
           try {{
             mermaid.initialize({{ startOnLoad:false, securityLevel:'loose' }});
             mermaid.run();
-          }} catch(e) {{
-            console.error("Mermaid init error", e);
-          }}
+          }} catch(e) {{ console.error(e); }}
         }};
         document.head.appendChild(s);
       }} else {{
-        try {{ mermaid.run(); }} catch(e) {{ console.error("Mermaid run error", e); }}
+        try {{ mermaid.run(); }} catch(e) {{ console.error(e); }}
       }}
     </script>
     """
     st.components.v1.html(html,height=height,scrolling=True)
 
-# ------------------------------
-# Streamlit UI
-# ------------------------------
-st.set_page_config(page_title="PDF→Mindmap (Mermaid図・L=2デフォ)", layout="wide")
+st.set_page_config(page_title="PDF→Mindmap (Mermaid図 L=2)", layout="wide")
 st.title("構文木解析 → マインドマップ（Mermaid図）")
-st.caption("デフォルト深さは L=2。Mermaidの構文エラー対策で危険文字を全角に自動置換します。")
 
 uploaded=st.file_uploader("PDFファイルをアップロード", type=["pdf"])
 col1,col2=st.columns([2,1])
@@ -190,41 +175,31 @@ if uploaded is not None:
         st.error(f"PDF抽出エラー: {e}")
         st.stop()
     with st.expander("抽出テキストを見る"):
-        st.text_area("Raw text",text,height=200)
+        st.text_area("Raw text", text, height=200)
     lines=[ln.strip() for ln in text.splitlines() if ln.strip()!=""]
     tree=build_tree_from_lines(lines)
-    root=tree.children[0] if len(tree.children)==1 else Node(uploaded.name.rsplit(".",1)[0],children=tree.children)
-    trimmed=trim_depth(root,depth)
+    root=tree.children[0] if len(tree.children)==1 else Node(uploaded.name.rsplit(".",1)[0], children=tree.children)
+    trimmed=trim_depth(root, depth)
     if trimmed is None:
-        st.warning("この深さではノードがありません。")
+        st.warning("この深さではノードなし")
     else:
-        mermaid_inner=to_mermaid(trimmed, sanitize=SANITIZE)
+        mermaid_inner=to_mermaid(trimmed)
         st.subheader("マインドマップ（Mermaid図）")
         render_mermaid(mermaid_inner)
-        # Downloads
+        # Export + debug
         mermaid_code="```mermaid\n"+mermaid_inner+"\n```"
         with st.expander("エクスポート / デバッグ"):
             colA,colB,colC=st.columns(3)
-            json_bytes=json.dumps(trimmed.to_dict(),ensure_ascii=False,indent=2).encode("utf-8")
-            colA.download_button("JSON",data=json_bytes,file_name="mindmap.json")
-            colB.download_button("Mermaidコード",data=mermaid_code.encode("utf-8"),file_name="mindmap.mmd")
-            def to_outline(n:Node,level=0,out=None):
+            json_bytes=json.dumps(trimmed.to_dict(), ensure_ascii=False, indent=2).encode("utf-8")
+            colA.download_button("JSON", data=json_bytes, file_name="mindmap.json")
+            colB.download_button("Mermaidコード", data=mermaid_code.encode("utf-8"), file_name="mindmap.mmd")
+            def to_outline(n:Node, level=0, out=None):
                 if out is None: out=[]
-                out.append("  "*level+"- "+n.title)
-                for c in n.children: to_outline(c,level+1,out)
+                out.append("  "*level + "- " + clean_label(n.title))
+                for c in n.children: to_outline(c, level+1, out)
                 return "\n".join(out)
             outline_txt=to_outline(trimmed)
-            colC.download_button("テキストアウトライン",data=outline_txt.encode("utf-8"),file_name="outline.txt")
-            st.text_area("Mermaidコード(図と同じ内容)", mermaid_inner, height=200)
-
-    # Warn if risky characters were found (for user awareness)
-    risky = set()
-    check_chars = "\\{}[]<>#|`~"
-    for ch in check_chars:
-        if ch in text:
-            risky.add(ch)
-    if risky:
-        st.info("Mermaidでエラーになりやすい文字を検出しました: " + " ".join(sorted(risky)) + " → 自動で全角等に置換しています。")
-
+            colC.download_button("テキストアウトライン", data=outline_txt.encode("utf-8"), file_name="outline.txt")
+            st.text_area("Mermaidコード (図と同一)", mermaid_inner, height=200)
 else:
     st.info("右上のファイルピッカーからPDFを選択してください。")
