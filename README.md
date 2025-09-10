@@ -1,14 +1,11 @@
-# PDF → Mindmap (Mermaid図)
+# PDF → Mindmap (Mermaid図・L=2デフォ)
 
-PDFから章節構造を解析し、**深さ(L)指定**でマインドマップをMermaid図として描画します。
+- デフォルト深さ **L=2**
+- Mermaid図として直接描画
+- Mermaid構文エラー対策として、危険文字（`\ { } [ ] < > # | ~` など）を全角/安全文字に自動置換
 
 ## 使い方
 ```bash
 pip install -r requirements.txt
 streamlit run app.py
 ```
-
-- デフォルト深さは L=2
-- PDFをアップロードし、スライダーで階層深さを変更
-- マインドマップをブラウザ上にMermaid図として表示
-- JSON / Mermaidコード / テキストアウトラインをエクスポート可能

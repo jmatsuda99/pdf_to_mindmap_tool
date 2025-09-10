@@ -13,12 +13,46 @@ try:
 except Exception as e:
     PyPDF2 = None
 
+# ------------------------------
+# Config
+# ------------------------------
+DEFAULT_DEPTH = 2
+SANITIZE = True  # turn off if you want raw labels
+
+# ------------------------------
+# Data structures
+# ------------------------------
 @dataclass
 class Node:
     title: str
-    children: List["Node"] = field(default_factory=list)
+    children: list["Node"] = field(default_factory=list)
     def to_dict(self):
         return {"title": self.title, "children": [c.to_dict() for c in self.children]}
+
+# ------------------------------
+# Utils
+# ------------------------------
+BAD_CTRL = re.compile(r"[\x00-\x1F\x7F]")
+def sanitize_title(s: str) -> str:
+    # Remove control chars
+    s = BAD_CTRL.sub("", s)
+    # Common Mermaid breaking chars → replace with full-width or safe glyphs
+    replacements = {
+        "`": "'",
+        "\\": "⧵",
+        "{": "（",  "}": "）",
+        "[": "［",  "]": "］",
+        "<": "‹",  ">": "›",
+        "#": "＃",
+        "|": "｜",
+        "\"": "”",
+        "~": "～",
+    }
+    for a,b in replacements.items():
+        s = s.replace(a,b)
+    # collapse excessive spaces
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
 
 def extract_text_from_pdf(file_bytes: bytes) -> str:
     if PyPDF2 is None:
@@ -92,11 +126,13 @@ def trim_depth(node: Node, depth:int, current:int=0)->Optional[Node]:
                 new_node.children.append(trimmed)
     return new_node
 
-def to_mermaid(node: Node)->str:
+def to_mermaid(node: Node, sanitize: bool=True)->str:
+    def clean(t: str)->str:
+        return sanitize_title(t) if sanitize else t.replace("`","'")
     lines=["mindmap"]
     def rec(n:Node, indent:int):
         prefix="  "*indent
-        title=n.title.replace("`","'")
+        title=clean(n.title)
         if indent==0:
             lines.append(f"{prefix}root(({title}))")
         else:
@@ -106,7 +142,7 @@ def to_mermaid(node: Node)->str:
     rec(node,0)
     return "\n".join(lines)
 
-def render_mermaid(mermaid_inner:str):
+def render_mermaid(mermaid_inner:str, height:int=650):
     unique_id=f"mermaid-{uuid.uuid4().hex}"
     html=f"""
     <div id="{unique_id}">
@@ -120,23 +156,31 @@ def render_mermaid(mermaid_inner:str):
         s.src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js";
         s.onload=function(){{
           window._mermaidLoaded=true;
-          mermaid.initialize({{ startOnLoad:false, securityLevel:'loose' }});
-          mermaid.run();
+          try {{
+            mermaid.initialize({{ startOnLoad:false, securityLevel:'loose' }});
+            mermaid.run();
+          }} catch(e) {{
+            console.error("Mermaid init error", e);
+          }}
         }};
         document.head.appendChild(s);
       }} else {{
-        mermaid.run();
+        try {{ mermaid.run(); }} catch(e) {{ console.error("Mermaid run error", e); }}
       }}
     </script>
     """
-    st.components.v1.html(html,height=600,scrolling=True)
+    st.components.v1.html(html,height=height,scrolling=True)
 
-st.set_page_config(page_title="PDF→Mindmap (Mermaid)", layout="wide")
+# ------------------------------
+# Streamlit UI
+# ------------------------------
+st.set_page_config(page_title="PDF→Mindmap (Mermaid図・L=2デフォ)", layout="wide")
 st.title("構文木解析 → マインドマップ（Mermaid図）")
+st.caption("デフォルト深さは L=2。Mermaidの構文エラー対策で危険文字を全角に自動置換します。")
 
 uploaded=st.file_uploader("PDFファイルをアップロード", type=["pdf"])
 col1,col2=st.columns([2,1])
-depth=col2.slider("表示する深さ (L)",min_value=1,max_value=8,value=2,step=1)
+depth=col2.slider("表示する深さ (L)",min_value=1,max_value=8,value=DEFAULT_DEPTH,step=1)
 
 if uploaded is not None:
     try:
@@ -149,20 +193,17 @@ if uploaded is not None:
         st.text_area("Raw text",text,height=200)
     lines=[ln.strip() for ln in text.splitlines() if ln.strip()!=""]
     tree=build_tree_from_lines(lines)
-    root=tree
-    if len(tree.children)==1:
-        root=tree.children[0]
-    else:
-        root=Node(uploaded.name.rsplit(".",1)[0],children=tree.children)
+    root=tree.children[0] if len(tree.children)==1 else Node(uploaded.name.rsplit(".",1)[0],children=tree.children)
     trimmed=trim_depth(root,depth)
     if trimmed is None:
-        st.warning("この深さではノードなし")
+        st.warning("この深さではノードがありません。")
     else:
-        mermaid_inner=to_mermaid(trimmed)
-        st.subheader("マインドマップ表示（Mermaid図）")
+        mermaid_inner=to_mermaid(trimmed, sanitize=SANITIZE)
+        st.subheader("マインドマップ（Mermaid図）")
         render_mermaid(mermaid_inner)
+        # Downloads
         mermaid_code="```mermaid\n"+mermaid_inner+"\n```"
-        with st.expander("エクスポート"):
+        with st.expander("エクスポート / デバッグ"):
             colA,colB,colC=st.columns(3)
             json_bytes=json.dumps(trimmed.to_dict(),ensure_ascii=False,indent=2).encode("utf-8")
             colA.download_button("JSON",data=json_bytes,file_name="mindmap.json")
@@ -174,5 +215,16 @@ if uploaded is not None:
                 return "\n".join(out)
             outline_txt=to_outline(trimmed)
             colC.download_button("テキストアウトライン",data=outline_txt.encode("utf-8"),file_name="outline.txt")
+            st.text_area("Mermaidコード(図と同じ内容)", mermaid_inner, height=200)
+
+    # Warn if risky characters were found (for user awareness)
+    risky = set()
+    check_chars = "\\{}[]<>#|`~"
+    for ch in check_chars:
+        if ch in text:
+            risky.add(ch)
+    if risky:
+        st.info("Mermaidでエラーになりやすい文字を検出しました: " + " ".join(sorted(risky)) + " → 自動で全角等に置換しています。")
+
 else:
     st.info("右上のファイルピッカーからPDFを選択してください。")
