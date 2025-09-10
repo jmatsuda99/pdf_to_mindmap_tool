@@ -6,47 +6,39 @@ from dataclasses import dataclass, field
 from typing import List, Optional, Tuple
 import streamlit as st
 from io import BytesIO
-import uuid
 
 try:
     import PyPDF2
-except Exception as e:
-        PyPDF2 = None
+except Exception:
+    PyPDF2 = None
+
+try:
+    import graphviz
+except Exception:
+    graphviz = None
+
+try:
+    import plotly.express as px
+    import pandas as pd
+except Exception:
+    px = None
+    pd = None
 
 DEFAULT_DEPTH = 2
 
+# ------------------------------
+# Data structures
+# ------------------------------
 @dataclass
 class Node:
     title: str
-    children: list["Node"] = field(default_factory=list)
+    children: List["Node"] = field(default_factory=list)
     def to_dict(self):
         return {"title": self.title, "children": [c.to_dict() for c in self.children]}
 
-BAD_CTRL = re.compile(r"[\x00-\x1F\x7F]")
-LEADING_NO = re.compile(r"^\s*\d+\s*$")
-LEADING_BULLET = re.compile(r"^\s*[-•・·]\s*")
-
-def clean_label(s: str) -> str:
-    s = BAD_CTRL.sub("", s)
-    # Replace characters known to confuse Mermaid parser
-    repl = {
-        "`":"'", "\\":"⧵", "{":"（","}":"）", "[":"［","]":"］",
-        "<":"‹", ">":"›", "#":"＃", "|":"｜", "\"":"”", "~":"～"
-    }
-    for a,b in repl.items():
-        s = s.replace(a,b)
-    # Normalize bullets / leading hyphens
-    s = LEADING_BULLET.sub("", s)  # remove a single leading bullet/hyphen
-    # If the whole label is just a number, prefix a safe text
-    if LEADING_NO.match(s):
-        s = "No. " + s.strip()
-    # Collapse whitespace
-    s = re.sub(r"\s+", " ", s).strip()
-    # Avoid empty labels
-    if not s:
-        s = "…"
-    return s
-
+# ------------------------------
+# PDF text extraction
+# ------------------------------
 def extract_text_from_pdf(file_bytes: bytes) -> str:
     if PyPDF2 is None:
         raise RuntimeError("PyPDF2 not installed. Please `pip install PyPDF2`.")
@@ -59,6 +51,9 @@ def extract_text_from_pdf(file_bytes: bytes) -> str:
             texts.append("")
     return "\n".join(texts)
 
+# ------------------------------
+# Heading detection heuristics
+# ------------------------------
 _heading_patterns = [
     r"^(?:第\s*\d+\s*章)\s*(.+)?$",
     r"^(?:Appendix|付録)\s*[:：]?\s*(.+)?$",
@@ -104,9 +99,9 @@ def build_tree_from_lines(lines):
             stack.append((level,node))
             last_added=node
         else:
-            bullet=Node(line)
+            # treat as bullet under last heading
             parent=last_added if last_added is not None else root
-            parent.children.append(bullet)
+            parent.children.append(Node(line))
     return root
 
 def trim_depth(node: Node, depth:int, current:int=0)->Optional[Node]:
@@ -119,53 +114,50 @@ def trim_depth(node: Node, depth:int, current:int=0)->Optional[Node]:
                 new_node.children.append(trimmed)
     return new_node
 
-def to_mermaid(node: Node)->str:
-    lines=["mindmap"]
-    def rec(n:Node, indent:int):
-        prefix="  "*indent
-        title=clean_label(n.title)
-        if indent==0:
-            lines.append(f"{prefix}root(({title}))")
-        else:
-            lines.append(f"{prefix}{title}")
+# ------------------------------
+# Graphviz rendering (robust)
+# ------------------------------
+def html_escape(s: str) -> str:
+    return s.replace("&","&amp;").replace("<","&lt;").replace(">","&gt;")
+
+def to_graphviz(node: Node):
+    if graphviz is None:
+        raise RuntimeError("graphviz is not installed. Please `pip install graphviz`.")
+    dot = graphviz.Digraph(format="svg")
+    def add(n: Node, parent_id: Optional[str]=None, idx=[0]):
+        idx[0]+=1
+        nid=f"n{idx[0]}"
+        label=html_escape(n.title)
+        dot.node(nid, f"<{label}>", shape="box", style="rounded,filled", fillcolor="white")
+        if parent_id:
+            dot.edge(parent_id, nid)
         for c in n.children:
-            rec(c,indent+1)
-    rec(node,0)
-    return "\n".join(lines)
+            add(c, nid, idx)
+        return nid
+    add(node, None)
+    return dot
 
-def render_mermaid(mermaid_inner:str, height:int=650):
-    unique_id=f"mermaid-{uuid.uuid4().hex}"
-    html=f"""
-    <div id="{unique_id}">
-      <pre class="mermaid">
-{mermaid_inner}
-      </pre>
-    </div>
-    <script>
-      if (!window._mermaidLoaded) {{
-        var s=document.createElement('script');
-        s.src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js";
-        s.onload=function(){{
-          window._mermaidLoaded=true;
-          try {{
-            mermaid.initialize({{ startOnLoad:false, securityLevel:'loose' }});
-            mermaid.run();
-          }} catch(e) {{ console.error(e); }}
-        }};
-        document.head.appendChild(s);
-      }} else {{
-        try {{ mermaid.run(); }} catch(e) {{ console.error(e); }}
-      }}
-    </script>
-    """
-    st.components.v1.html(html,height=height,scrolling=True)
+# ------------------------------
+# Sunburst / Treemap via Plotly
+# ------------------------------
+def to_edges(node: Node, parent_title: Optional[str]=None, rows=None):
+    if rows is None: rows = []
+    rows.append({"id": node.title, "parent": parent_title})
+    for c in node.children:
+        to_edges(c, node.title, rows)
+    return rows
 
-st.set_page_config(page_title="PDF→Mindmap (Mermaid図 L=2)", layout="wide")
-st.title("構文木解析 → マインドマップ（Mermaid図）")
+# ------------------------------
+# Streamlit UI
+# ------------------------------
+st.set_page_config(page_title="PDF→構文木（Graphviz/Sunburst） L=2", layout="wide")
+st.title("構文木解析 → 視覚化（Graphvizツリー / Sunburst）")
+st.caption("Mermaidの代わりに **Graphviz** と **Plotly Sunburst** を使った安定描画に切り替えました。")
 
 uploaded=st.file_uploader("PDFファイルをアップロード", type=["pdf"])
 col1,col2=st.columns([2,1])
-depth=col2.slider("表示する深さ (L)",min_value=1,max_value=8,value=DEFAULT_DEPTH,step=1)
+depth=col2.slider("表示する深さ (L)", min_value=1, max_value=8, value=DEFAULT_DEPTH, step=1)
+view = col2.radio("表示モード", ["Graphvizツリー","Sunburst","Treemap","アウトライン"], index=0)
 
 if uploaded is not None:
     try:
@@ -174,32 +166,50 @@ if uploaded is not None:
     except Exception as e:
         st.error(f"PDF抽出エラー: {e}")
         st.stop()
+
     with st.expander("抽出テキストを見る"):
         st.text_area("Raw text", text, height=200)
+
     lines=[ln.strip() for ln in text.splitlines() if ln.strip()!=""]
     tree=build_tree_from_lines(lines)
     root=tree.children[0] if len(tree.children)==1 else Node(uploaded.name.rsplit(".",1)[0], children=tree.children)
     trimmed=trim_depth(root, depth)
     if trimmed is None:
-        st.warning("この深さではノードなし")
+        st.warning("この深さではノードがありません。")
     else:
-        mermaid_inner=to_mermaid(trimmed)
-        st.subheader("マインドマップ（Mermaid図）")
-        render_mermaid(mermaid_inner)
-        # Export + debug
-        mermaid_code="```mermaid\n"+mermaid_inner+"\n```"
-        with st.expander("エクスポート / デバッグ"):
-            colA,colB,colC=st.columns(3)
-            json_bytes=json.dumps(trimmed.to_dict(), ensure_ascii=False, indent=2).encode("utf-8")
-            colA.download_button("JSON", data=json_bytes, file_name="mindmap.json")
-            colB.download_button("Mermaidコード", data=mermaid_code.encode("utf-8"), file_name="mindmap.mmd")
+        if view=="Graphvizツリー":
+            try:
+                dot = to_graphviz(trimmed)
+                st.graphviz_chart(dot.source, use_container_width=True)
+            except Exception as e:
+                st.error(f"Graphviz描画エラー: {e}")
+        elif view in ("Sunburst","Treemap"):
+            if px is None or pd is None:
+                st.error("plotly と pandas が必要です。 `pip install plotly pandas`")
+            else:
+                rows = to_edges(trimmed)
+                df = pd.DataFrame(rows)
+                if view=="Sunburst":
+                    fig = px.sunburst(df, names="id", parents="parent")
+                else:
+                    fig = px.treemap(df, names="id", parents="parent")
+                fig.update_layout(margin=dict(l=0,r=0,t=30,b=0))
+                st.plotly_chart(fig, use_container_width=True)
+        else:
             def to_outline(n:Node, level=0, out=None):
                 if out is None: out=[]
-                out.append("  "*level + "- " + clean_label(n.title))
+                out.append("  "*level + "- " + n.title)
                 for c in n.children: to_outline(c, level+1, out)
                 return "\n".join(out)
-            outline_txt=to_outline(trimmed)
-            colC.download_button("テキストアウトライン", data=outline_txt.encode("utf-8"), file_name="outline.txt")
-            st.text_area("Mermaidコード (図と同一)", mermaid_inner, height=200)
+            st.code(to_outline(trimmed), language="text")
+
+        # Export
+        with st.expander("エクスポート"):
+            colA, colB = st.columns(2)
+            json_bytes=json.dumps(trimmed.to_dict(), ensure_ascii=False, indent=2).encode("utf-8")
+            colA.download_button("JSON", data=json_bytes, file_name="tree.json")
+            if graphviz is not None:
+                dot = to_graphviz(trimmed)
+                colB.download_button("Graphviz DOT", data=dot.source.encode("utf-8"), file_name="tree.dot")
 else:
     st.info("右上のファイルピッカーからPDFを選択してください。")

@@ -1,12 +1,15 @@
-# PDF → Mindmap (Mermaid図・強化サニタイズ v4)
+# PDF → 構文木（Graphviz / Sunburst） v5
 
-- 先頭が**数字だけ**の行は `No. <数字>` に変換（例：`1` → `No. 1`）
-- 先頭の **- / • / ・ / ·** は除去（`-予測周期` → `予測周期`）
-- 記号（`\ { } [ ] < > # | ~ " \` など）を安全文字に置換
-- デフォルト深さ L=2、Mermaid図で描画
+Mermaidではエラーになりやすいケースに対応するため、**Graphvizツリー**と**Plotly Sunburst/Treemap**で安定表示する版です。  
+デフォルト深さは **L=2**。
 
 ## 使い方
 ```bash
 pip install -r requirements.txt
 streamlit run app.py
 ```
+- 表示モードを「Graphvizツリー / Sunburst / Treemap / アウトライン」から選択
+- JSON と Graphviz DOT のダウンロードに対応
+- Sunburst/Treemap で全体の包含関係を直感的に把握可能
+
+※ GraphvizはPythonパッケージで描画できます（外部バイナリ不要）。
